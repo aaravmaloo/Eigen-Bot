@@ -201,6 +201,7 @@ Powerful tools for server administrators:
 
 ### **Prerequisites**
 - Python 3.11 or higher
+- FFMpeg (for TTS command)
 - Discord Bot Token ([Get one here](https://discord.com/developers/applications))
 - Git (for cloning)
 
