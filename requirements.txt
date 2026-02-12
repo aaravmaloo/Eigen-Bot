@@ -11,3 +11,4 @@ black>=23.0.0
 flake8>=6.0.0
 Pillow>=10.0.0
 edge_tts>=7.2.7
+PyNacl>=1.5.0
