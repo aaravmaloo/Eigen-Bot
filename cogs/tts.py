@@ -110,7 +110,6 @@ class Say(commands.Cog):
     # ----------------------------
     # TTS COMMAND
     # ----------------------------
-
     @commands.hybrid_command(name="tts")
     @commands.cooldown(1, 2, commands.BucketType.user)
     async def tts(self, ctx: commands.Context, *, text: str):
@@ -125,11 +124,17 @@ class Say(commands.Cog):
         if not isinstance(author, discord.Member):
             return await ctx.send("Server member only.")
 
+        # Require login
+        if ctx.author.id not in self.tts_names:
+            return await ctx.send(
+                "You must set your TTS name first.\n"
+                "Use: ?logintts <your_name>"
+            )
+
         if not author.voice or not author.voice.channel:
             return await ctx.send("Join a voice channel first.")
 
         channel = author.voice.channel
-
         vc = ctx.voice_client
 
         if not isinstance(vc, discord.VoiceClient):
@@ -140,7 +145,6 @@ class Say(commands.Cog):
 
         content = text
 
-        # Replace mentions
         if ctx.message:
             for member in ctx.message.mentions:
                 content = content.replace(
@@ -155,11 +159,11 @@ class Say(commands.Cog):
                     f"<#{channel_.id}>", f"#{channel_.name}"
                 )
 
-        tts_name = self.tts_names.get(ctx.author.id, ctx.author.display_name)
+        tts_name = self.tts_names[ctx.author.id]
 
         self.queue.put(f"{tts_name} said {content}")
 
-        await ctx.send(f"Queued: {text}")
+        await ctx.send(f'"{tts_name}" is saying: {text}')
 
         await self.process_queue(vc)
 
