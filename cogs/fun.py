@@ -8,8 +8,13 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import asyncio
+import io
+import logging
+import time
+import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
+from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
 # Professional data sets without emojis
 COMPLIMENTS = [
@@ -65,11 +70,115 @@ TRIVIA_QUESTIONS = [
     }
 ]
 
+ABSOLUTE_TEMPLATE_GIF_URL = "https://media1.tenor.com/m/9zeYdsiRscoAAAAd/absolute-cinema.gif"
+max_absol_text_len = 24
+ABSOLUTE_TEMPLATE_CACHE_TTL_SECONDS = 1800
+
+logger = logging.getLogger(__name__)
+
 class Fun(commands.Cog):
     """Professional fun commands for programming communities."""
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._absolute_template_cache_bytes: Optional[bytes] = None
+        self._absolute_template_cache_expires_at = 0.0
+        self._absolute_template_cache_lock = asyncio.Lock()
+
+    @staticmethod
+    def _download_bytes(url: str) -> bytes:
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.read()
+
+    @staticmethod
+    def _load_font(size: int) -> ImageFont.ImageFont:
+        for font_name in ("arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf"):
+            try:
+                return ImageFont.truetype(font_name, size=size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    @classmethod
+    def _build_absolute_gif(cls, template_bytes: bytes, avatar_bytes: bytes, text: str) -> io.BytesIO:
+        template = Image.open(io.BytesIO(template_bytes))
+        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+
+        output_frames = []
+        frame_durations = []
+        caption = f"ABSOLUTE {text.upper()}"
+        width, height = template.size
+
+        avatar_size = max(56, int(min(width, height) * 0.22))
+        resized_avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+        avatar_mask = Image.new("L", (avatar_size, avatar_size), 0)
+        ImageDraw.Draw(avatar_mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
+        circular_avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+        circular_avatar.paste(resized_avatar, (0, 0), avatar_mask)
+        avatar_x = (width - avatar_size) // 2
+        avatar_y = int(height * 0.28)
+
+        font_size = max(14, width // 11)
+        font = cls._load_font(font_size)
+        stroke_width = max(1, width // 140)
+
+        for frame in ImageSequence.Iterator(template):
+            base = frame.convert("RGBA")
+            base.paste(circular_avatar, (avatar_x, avatar_y), circular_avatar)
+
+            draw = ImageDraw.Draw(base)
+
+            text_bbox = draw.textbbox((0, 0), caption, font=font, stroke_width=stroke_width)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+
+            bar_padding = max(6, width // 70)
+            bar_height = text_height + (bar_padding * 2)
+            bar_top = height - bar_height
+            draw.rectangle((0, bar_top, width, height), fill=(0, 0, 0, 210))
+
+            text_x = (width - text_width) // 2
+            text_y = bar_top + (bar_height - text_height) // 2
+            draw.text(
+                (text_x, text_y),
+                caption,
+                font=font,
+                fill=(255, 255, 255, 255),
+                stroke_width=stroke_width,
+                stroke_fill=(0, 0, 0, 255)
+            )
+
+            output_frames.append(base.convert("P", palette=Image.Palette.ADAPTIVE))
+            frame_durations.append(frame.info.get("duration", 40))
+
+        result = io.BytesIO()
+        output_frames[0].save(
+            result,
+            format="GIF",
+            save_all=True,
+            append_images=output_frames[1:],
+            duration=frame_durations,
+            loop=0,
+            disposal=2
+        )
+        result.seek(0)
+        return result
+
+    async def _get_absolute_template_bytes(self) -> bytes:
+        now = time.monotonic()
+        if self._absolute_template_cache_bytes and now < self._absolute_template_cache_expires_at:
+            return self._absolute_template_cache_bytes
+
+        async with self._absolute_template_cache_lock:
+            now = time.monotonic()
+            if self._absolute_template_cache_bytes and now < self._absolute_template_cache_expires_at:
+                return self._absolute_template_cache_bytes
+
+            template_bytes = await asyncio.to_thread(self._download_bytes, ABSOLUTE_TEMPLATE_GIF_URL)
+            self._absolute_template_cache_bytes = template_bytes
+            self._absolute_template_cache_expires_at = now + ABSOLUTE_TEMPLATE_CACHE_TTL_SECONDS
+            return template_bytes
     @commands.hybrid_command(name="compliment", help="Receive a professional programming compliment")
     async def compliment(self, ctx: commands.Context, member: Optional[discord.Member] = None):
         """Give a professional compliment to yourself or another member."""
@@ -250,6 +359,65 @@ class Fun(commands.Cog):
         )
         embed.set_footer(text="CodeVerse Bot | Decision Helper")
         await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.hybrid_command(name="absolute", help="Put your avatar on the 'absolute cinema' GIF")
+
+
+
+    @app_commands.describe(text="Text to replace 'cinema' with")
+    async def absolute(self, ctx: commands.Context, *, text: str):
+
+        
+        clean_text = " ".join(text.split())
+
+        if not clean_text:
+            await ctx.reply("Please provide text. Example: `/absolute text: coding`", mention_author=False)
+            return
+
+
+        if len(clean_text) > max_absol_text_len:
+            await ctx.reply(
+                f"Text must be {max_absol_text_len} characters or less.",
+                mention_author=False
+            )
+            return
+
+
+        try:
+            await ctx.defer()
+        except Exception:
+            pass
+
+        try:
+            avatar_asset = ctx.author.display_avatar.with_size(256)
+            try:
+                avatar_asset = avatar_asset.with_format("png")
+            except Exception:
+                pass
+
+            avatar_bytes = await avatar_asset.read()
+            template_bytes = await self._get_absolute_template_bytes()
+            gif_bytes = await asyncio.to_thread(
+                self._build_absolute_gif,
+                template_bytes,
+                avatar_bytes,
+                clean_text
+            )
+        except Exception:
+            logger.exception("Failed to generate /absolute GIF")
+            await ctx.reply(
+                "Couldn't generate the GIF right now. Try again later.",
+                mention_author=False
+            )
+            return
+
+
+        await ctx.reply(file=discord.File(gif_bytes, filename="absolute.gif"), mention_author=False)
+
+
+
+
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Fun(bot))
