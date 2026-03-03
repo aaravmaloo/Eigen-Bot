@@ -17,6 +17,23 @@ class Admin(commands.Cog):
         self.bot = bot
         self.config = config
 
+    async def _is_owner_or_admin_interaction(self, interaction: discord.Interaction) -> bool:
+        """Allow owner or users with administrator permission for slash commands."""
+        if self.config.owner_id and interaction.user.id == self.config.owner_id:
+            return True
+
+        if interaction.guild is None:
+            return False
+
+        if isinstance(interaction.user, discord.Member):
+            return interaction.user.guild_permissions.administrator
+
+        try:
+            member = await interaction.guild.fetch_member(interaction.user.id)
+        except Exception:
+            return False
+        return member.guild_permissions.administrator
+
     async def cog_check(self, ctx: commands.Context):
         """Allow owner or users with administrator permission."""
         if self.config.owner_id and ctx.author.id == self.config.owner_id:
@@ -34,13 +51,13 @@ class Admin(commands.Cog):
         try:
             await self.bot.reload_extension(f'cogs.{cog_name}')
             embed = EmbedBuilder.success_embed(
-                "✅ Cog Reloaded",
+                "Cog Reloaded",
                 f"Successfully reloaded `{cog_name}`"
             )
             await ctx.send(embed=embed)
         except Exception as e:
             embed = EmbedBuilder.error_embed(
-                "❌ Failed to Reload",
+                "Failed to Reload",
                 f"Could not reload `{cog_name}`: {str(e)}"
             )
             await ctx.send(embed=embed)
@@ -50,16 +67,9 @@ class Admin(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def reload_cog_slash(self, interaction: discord.Interaction, cog_name: str):
         """Slash command for reloading cogs."""
-        is_owner = self.config.owner_id and interaction.user.id == self.config.owner_id
-        is_admin = False
-        if interaction.guild:
-            member = interaction.guild.get_member(interaction.user.id)
-            if member and member.guild_permissions.administrator:
-                is_admin = True
-        
-        if not (is_owner or is_admin):
+        if not await self._is_owner_or_admin_interaction(interaction):
             await interaction.response.send_message(
-                "You don't have permission to use this command.", 
+                "You don't have permission to use this command.",
                 ephemeral=True
             )
             return
@@ -67,13 +77,13 @@ class Admin(commands.Cog):
         try:
             await self.bot.reload_extension(f'cogs.{cog_name}')
             embed = EmbedBuilder.success_embed(
-                "✅ Cog Reloaded",
+                "Cog Reloaded",
                 f"Successfully reloaded `{cog_name}`"
             )
             await interaction.response.send_message(embed=embed)
         except Exception as e:
             embed = EmbedBuilder.error_embed(
-                "❌ Failed to Reload",
+                "Failed to Reload",
                 f"Could not reload `{cog_name}`: {str(e)}"
             )
             await interaction.response.send_message(embed=embed)
@@ -89,20 +99,20 @@ class Admin(commands.Cog):
                 self.bot.tree.copy_global_to(guild=guild)
                 synced = await self.bot.tree.sync(guild=guild)
                 embed = EmbedBuilder.success_embed(
-                    "✅ Commands Synced",
+                    "Commands Synced",
                     f"Synced {len(synced)} commands to guild {self.config.guild_id}"
                 )
             else:
                 self.bot.tree.clear_commands(guild=None)
                 synced = await self.bot.tree.sync()
                 embed = EmbedBuilder.success_embed(
-                    "✅ Commands Synced",
+                    "Commands Synced",
                     f"Synced {len(synced)} commands globally"
                 )
             await ctx.send(embed=embed)
         except Exception as e:
             embed = EmbedBuilder.error_embed(
-                "❌ Sync Failed",
+                "Sync Failed",
                 f"Failed to sync commands: {str(e)}"
             )
             await ctx.send(embed=embed)
@@ -111,19 +121,14 @@ class Admin(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def sync_commands_slash(self, interaction: discord.Interaction):
         """Slash command for syncing commands."""
-        is_owner = self.config.owner_id and interaction.user.id == self.config.owner_id
-        is_admin = False
-        if interaction.guild:
-            member = interaction.guild.get_member(interaction.user.id)
-            if member and member.guild_permissions.administrator:
-                is_admin = True
-        
-        if not (is_owner or is_admin):
+        if not await self._is_owner_or_admin_interaction(interaction):
             await interaction.response.send_message(
-                "You don't have permission to use this command.", 
+                "You don't have permission to use this command.",
                 ephemeral=True
             )
             return
+
+        await interaction.response.defer(ephemeral=True)
 
         try:
             if self.config.guild_id:
@@ -132,23 +137,23 @@ class Admin(commands.Cog):
                 self.bot.tree.copy_global_to(guild=guild)
                 synced = await self.bot.tree.sync(guild=guild)
                 embed = EmbedBuilder.success_embed(
-                    "✅ Commands Synced",
+                    "Commands Synced",
                     f"Synced {len(synced)} commands to guild {self.config.guild_id}"
                 )
             else:
                 self.bot.tree.clear_commands(guild=None)
                 synced = await self.bot.tree.sync()
                 embed = EmbedBuilder.success_embed(
-                    "✅ Commands Synced",
+                    "Commands Synced",
                     f"Synced {len(synced)} commands globally"
                 )
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
             embed = EmbedBuilder.error_embed(
-                "❌ Sync Failed",
+                "Sync Failed",
                 f"Failed to sync commands: {str(e)}"
             )
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot):
