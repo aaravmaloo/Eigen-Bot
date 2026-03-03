@@ -9,6 +9,8 @@ from discord import app_commands
 import random
 import asyncio
 import io
+import logging
+import time
 import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
@@ -70,12 +72,18 @@ TRIVIA_QUESTIONS = [
 
 ABSOLUTE_TEMPLATE_GIF_URL = "https://media1.tenor.com/m/9zeYdsiRscoAAAAd/absolute-cinema.gif"
 max_absol_text_len = 24
+ABSOLUTE_TEMPLATE_CACHE_TTL_SECONDS = 1800
+
+logger = logging.getLogger(__name__)
 
 class Fun(commands.Cog):
     """Professional fun commands for programming communities."""
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._absolute_template_cache_bytes: Optional[bytes] = None
+        self._absolute_template_cache_expires_at = 0.0
+        self._absolute_template_cache_lock = asyncio.Lock()
 
     @staticmethod
     def _download_bytes(url: str) -> bytes:
@@ -100,28 +108,26 @@ class Fun(commands.Cog):
         output_frames = []
         frame_durations = []
         caption = f"ABSOLUTE {text.upper()}"
+        width, height = template.size
+
+        avatar_size = max(56, int(min(width, height) * 0.22))
+        resized_avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+        avatar_mask = Image.new("L", (avatar_size, avatar_size), 0)
+        ImageDraw.Draw(avatar_mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
+        circular_avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+        circular_avatar.paste(resized_avatar, (0, 0), avatar_mask)
+        avatar_x = (width - avatar_size) // 2
+        avatar_y = int(height * 0.28)
+
+        font_size = max(14, width // 11)
+        font = cls._load_font(font_size)
+        stroke_width = max(1, width // 140)
 
         for frame in ImageSequence.Iterator(template):
             base = frame.convert("RGBA")
-            width, height = base.size
-
-            avatar_size = max(56, int(min(width, height) * 0.22))
-            resized_avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-
-            # Circular avatar mask to fit naturally on the subject's face.
-            avatar_mask = Image.new("L", (avatar_size, avatar_size), 0)
-            ImageDraw.Draw(avatar_mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-            circular_avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
-            circular_avatar.paste(resized_avatar, (0, 0), avatar_mask)
-
-            avatar_x = (width - avatar_size) // 2
-            avatar_y = int(height * 0.28)
             base.paste(circular_avatar, (avatar_x, avatar_y), circular_avatar)
 
             draw = ImageDraw.Draw(base)
-            font_size = max(14, width // 11)
-            font = cls._load_font(font_size)
-            stroke_width = max(1, width // 140)
 
             text_bbox = draw.textbbox((0, 0), caption, font=font, stroke_width=stroke_width)
             text_width = text_bbox[2] - text_bbox[0]
@@ -158,6 +164,21 @@ class Fun(commands.Cog):
         )
         result.seek(0)
         return result
+
+    async def _get_absolute_template_bytes(self) -> bytes:
+        now = time.monotonic()
+        if self._absolute_template_cache_bytes and now < self._absolute_template_cache_expires_at:
+            return self._absolute_template_cache_bytes
+
+        async with self._absolute_template_cache_lock:
+            now = time.monotonic()
+            if self._absolute_template_cache_bytes and now < self._absolute_template_cache_expires_at:
+                return self._absolute_template_cache_bytes
+
+            template_bytes = await asyncio.to_thread(self._download_bytes, ABSOLUTE_TEMPLATE_GIF_URL)
+            self._absolute_template_cache_bytes = template_bytes
+            self._absolute_template_cache_expires_at = now + ABSOLUTE_TEMPLATE_CACHE_TTL_SECONDS
+            return template_bytes
     @commands.hybrid_command(name="compliment", help="Receive a professional programming compliment")
     async def compliment(self, ctx: commands.Context, member: Optional[discord.Member] = None):
         """Give a professional compliment to yourself or another member."""
@@ -375,7 +396,7 @@ class Fun(commands.Cog):
                 pass
 
             avatar_bytes = await avatar_asset.read()
-            template_bytes = await asyncio.to_thread(self._download_bytes, ABSOLUTE_TEMPLATE_GIF_URL)
+            template_bytes = await self._get_absolute_template_bytes()
             gif_bytes = await asyncio.to_thread(
                 self._build_absolute_gif,
                 template_bytes,
@@ -383,6 +404,7 @@ class Fun(commands.Cog):
                 clean_text
             )
         except Exception:
+            logger.exception("Failed to generate /absolute GIF")
             await ctx.reply(
                 "Couldn't generate the GIF right now. Try again later.",
                 mention_author=False
