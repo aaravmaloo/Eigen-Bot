@@ -6,13 +6,15 @@ import asyncio
 import time
 from pathlib import Path
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 # Constants
 STAFF_ROLE_ID = 1403059755001577543
-REVIEW_CHANNEL_ID = 1400075578391920792
+REVIEW_CHANNEL_ID = 1396353386429026304
 DB_PATH = Path("data/staff_applications.db")
+MAX_APPLICATIONS_PER_MONTH = 2
 
 QUESTIONS = [
     {
@@ -160,6 +162,20 @@ class PanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
+    async def check_monthly_limit(self, user_id: int) -> bool:
+        """Check if user has reached monthly application limit. Returns True if limit reached."""
+        current_month_start = int(datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+        
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM applications WHERE user_id = ? AND timestamp >= ? AND status != 'denied'",
+                (user_id, current_month_start)
+            ) as cursor:
+                row = await cursor.fetchone()
+                count = row[0] if row else 0
+        
+        return count >= MAX_APPLICATIONS_PER_MONTH
+
     @discord.ui.button(label="Start Application", style=discord.ButtonStyle.secondary, custom_id="staff_app:start")
     async def start_app(self, interaction: discord.Interaction, button: discord.ui.Button):
         user = interaction.user
@@ -170,6 +186,14 @@ class PanelView(discord.ui.View):
                 if await cursor.fetchone():
                     await interaction.response.send_message("You already have a pending application.", ephemeral=True)
                     return
+        
+        # Check monthly limit
+        if await self.check_monthly_limit(user.id):
+            await interaction.response.send_message(
+                f"You have reached the maximum limit of {MAX_APPLICATIONS_PER_MONTH} staff applications per month. Please try again next month.",
+                ephemeral=True
+            )
+            return
 
         try:
             dm_channel = await user.create_dm()
