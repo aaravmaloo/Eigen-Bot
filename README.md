@@ -1,11 +1,4 @@
-<<<<<<< HEAD
 # Eigen Bot - Comprehensive Discord Community Bot
-=======
-> [!WARNING]
-> This Project is no longer be maintained and has been moved to [Eigen-Bot](https://github.com/TheCodeVerseHub/Eigen-Bot) All further updates will only be shared in @Eigen-Bot 
-
-# Eigen Bot - Comprehensive Discord Community & Economy Bot
->>>>>>> 333fa0df3b0da3d35de24992cebe77defa14e495
 
 > **A feature-rich, production-ready Discord bot for community engagement, support tickets, entertainment, and powerful moderation tools.**
 
@@ -418,4 +411,5 @@ Special thanks to the discord.py community and all contributors!
 Made with for Discord communities
 
 </div>
+
 
