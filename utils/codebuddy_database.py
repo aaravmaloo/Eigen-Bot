@@ -109,6 +109,45 @@ async def init_db():
             )
         """)
 
+        # Seasonal events / live ops tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'scheduled',
+                announcement_channel_id INTEGER,
+                created_by INTEGER,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS event_participants (
+                event_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                joined_at TEXT NOT NULL,
+                last_checkin TEXT,
+                last_activity TEXT,
+                PRIMARY KEY (event_id, user_id)
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS event_actions (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                points INTEGER NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         # Truth or Dare table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tod_questions (
