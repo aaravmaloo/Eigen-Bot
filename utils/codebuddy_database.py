@@ -335,7 +335,7 @@ async def increment_user_score(user_id: int, points: int = 1, reset_streak: bool
                 if days_diff > 1:  # More than 1 day gap resets streak
                     reset_streak = True
             
-            new_streak = 0 if reset_streak else current_streak + 1
+            new_streak = 1 if reset_streak else current_streak + 1
             best_streak = max(best_streak, new_streak)
             new_score = current_score + points
             await db.execute(
@@ -343,7 +343,7 @@ async def increment_user_score(user_id: int, points: int = 1, reset_streak: bool
                 (new_score, new_streak, best_streak, today, user_id)
             )
         else:
-            streak = 0 if reset_streak else 1
+            streak = 1 if reset_streak else 1
             best_streak = streak
             await db.execute(
                 "INSERT INTO leaderboard (user_id, correct_answers, streak, best_streak, last_activity) VALUES (?, ?, ?, ?, ?)",
