@@ -98,7 +98,8 @@ class Fun2OoshBot(commands.Bot):
             'cogs.tod',
             'cogs.daily_quests',
             'cogs.staff_applications',
-            'cogs.tts'
+            'cogs.tts',
+            'cogs.events'
         ]
 
         for ext in feature_cogs:
