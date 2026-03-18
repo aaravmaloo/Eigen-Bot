@@ -1,11 +1,20 @@
+import logging
+from datetime import datetime, timezone
+from typing import List, Optional, Tuple
+
 import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, List
 
-DB_PATH = "botdata.db"
+from utils.codebuddy_database import DB_PATH
+
+DB_TIMEOUT = 30.0
+logger = logging.getLogger(__name__)
+
+
+def _connect_db():
+    return aiosqlite.connect(DB_PATH, timeout=DB_TIMEOUT)
 
 
 def _utcnow() -> datetime:
@@ -44,19 +53,27 @@ class SeasonalEvents(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.event_tick.start()
+
+    async def cog_load(self):
+        if not self.event_tick.is_running():
+            self.event_tick.start()
 
     def cog_unload(self):
-        self.event_tick.cancel()
+        if self.event_tick.is_running():
+            self.event_tick.cancel()
 
     async def _fetch_events(self, guild_id: Optional[int] = None) -> List[tuple]:
-        query = "SELECT event_id, guild_id, name, description, start_at, end_at, status, announcement_channel_id FROM events"
-        params: tuple = ()
+        query = (
+            "SELECT event_id, guild_id, name, description, start_at, end_at, status, announcement_channel_id "
+            "FROM events WHERE status IN ('scheduled', 'active')"
+        )
+        params = []
         if guild_id is not None:
-            query += " WHERE guild_id = ?"
-            params = (guild_id,)
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(query, params)
+            query += " AND guild_id = ?"
+            params.append(guild_id)
+        query += " ORDER BY guild_id ASC, start_at ASC"
+        async with _connect_db() as db:
+            cursor = await db.execute(query, tuple(params))
             return await cursor.fetchall()
 
     async def _set_status(self, event_id: int, status: str, *, start_at: Optional[datetime] = None, end_at: Optional[datetime] = None):
@@ -69,42 +86,45 @@ class SeasonalEvents(commands.Cog):
             fields.append("end_at = ?")
             values.append(end_at.isoformat())
         values.append(event_id)
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             await db.execute(f"UPDATE events SET {', '.join(fields)} WHERE event_id = ?", values)
             await db.commit()
 
     async def _get_active_event(self, guild_id: int) -> Optional[tuple]:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT event_id, name, description, start_at, end_at, status, announcement_channel_id "
-                "FROM events WHERE guild_id = ? AND status = 'active'",
+                "FROM events WHERE guild_id = ? AND status = 'active' "
+                "ORDER BY start_at ASC LIMIT 1",
                 (guild_id,)
             )
             row = await cursor.fetchone()
         return row
 
     async def _get_next_event(self, guild_id: int) -> Optional[tuple]:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT event_id, name, description, start_at, end_at, status, announcement_channel_id "
-                "FROM events WHERE guild_id = ? AND status = 'scheduled'",
+                "FROM events WHERE guild_id = ? AND status = 'scheduled' "
+                "ORDER BY start_at ASC LIMIT 1",
                 (guild_id,)
             )
-            rows = await cursor.fetchall()
-        if not rows:
-            return None
-        rows_sorted = sorted(rows, key=lambda r: datetime.fromisoformat(r[3]))
-        return rows_sorted[0]
+            return await cursor.fetchone()
 
-    async def _sync_guild(self, guild_id: int):
+    async def _sync_events(self, rows: List[tuple]):
         now = _utcnow()
-        rows = await self._fetch_events(guild_id)
         for row in rows:
-            event_id, _, name, description, start_at, end_at, status, channel_id = row
+            event_id, guild_id, name, description, start_at, end_at, status, channel_id = row
             try:
                 start_dt = datetime.fromisoformat(start_at)
                 end_dt = datetime.fromisoformat(end_at)
             except ValueError:
+                logger.warning(
+                    "Skipping event %s due to invalid datetime values: start_at=%r end_at=%r",
+                    event_id,
+                    start_at,
+                    end_at,
+                )
                 continue
             if status == "scheduled" and start_dt <= now:
                 await self._set_status(event_id, "active")
@@ -112,6 +132,10 @@ class SeasonalEvents(commands.Cog):
             elif status == "active" and end_dt <= now:
                 await self._set_status(event_id, "ended")
                 await self._announce_end(guild_id, event_id, name, description, start_dt, end_dt, channel_id)
+
+    async def _sync_guild(self, guild_id: int):
+        rows = await self._fetch_events(guild_id)
+        await self._sync_events(rows)
 
     async def _announce_start(self, guild_id: int, event_id: int, name: str, description: str,
                               start_dt: datetime, end_dt: datetime, channel_id: Optional[int]):
@@ -155,7 +179,7 @@ class SeasonalEvents(commands.Cog):
         await channel.send(embed=embed)
 
     async def _top_participants(self, event_id: int, limit: int) -> List[Tuple[int, int]]:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT user_id, points FROM event_participants WHERE event_id = ? "
                 "ORDER BY points DESC, last_activity DESC LIMIT ?",
@@ -164,7 +188,7 @@ class SeasonalEvents(commands.Cog):
             return await cursor.fetchall()
 
     async def _ensure_joined(self, event_id: int, user_id: int) -> bool:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT 1 FROM event_participants WHERE event_id = ? AND user_id = ?",
                 (event_id, user_id)
@@ -172,37 +196,61 @@ class SeasonalEvents(commands.Cog):
             exists = await cursor.fetchone()
             if exists:
                 return True
+            now = _utcnow().isoformat()
             await db.execute(
                 "INSERT INTO event_participants (event_id, user_id, points, joined_at, last_activity) "
                 "VALUES (?, ?, 0, ?, ?)",
-                (event_id, user_id, _utcnow().isoformat(), _utcnow().isoformat())
+                (event_id, user_id, now, now)
             )
             await db.commit()
             return False
 
+    async def _log_point_action(
+        self,
+        db: aiosqlite.Connection,
+        event_id: int,
+        user_id: int,
+        points: int,
+        reason: str,
+        *,
+        created_at: str,
+    ):
+        await db.execute(
+            "INSERT INTO event_point_actions (event_id, user_id, points, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (event_id, user_id, points, reason, created_at),
+        )
+
     async def _add_points(self, event_id: int, user_id: int, points: int, reason: str):
         now = _utcnow().isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             await db.execute(
                 "UPDATE event_participants SET points = points + ?, last_activity = ? "
                 "WHERE event_id = ? AND user_id = ?",
                 (points, now, event_id, user_id)
             )
-            await db.execute(
-                "INSERT INTO event_actions (event_id, user_id, points, reason, created_at) VALUES (?, ?, ?, ?, ?)",
-                (event_id, user_id, points, reason, now)
-            )
+            await self._log_point_action(db, event_id, user_id, points, reason, created_at=now)
             await db.commit()
 
     @tasks.loop(minutes=1)
     async def event_tick(self):
         try:
             rows = await self._fetch_events()
-            guild_ids = sorted({row[1] for row in rows})
-            for guild_id in guild_ids:
-                await self._sync_guild(guild_id)
         except Exception:
+            logger.exception("Failed to fetch event rows during event tick")
             return
+        if not rows:
+            return
+
+        events_by_guild = {}
+        for row in rows:
+            events_by_guild.setdefault(row[1], []).append(row)
+
+        for guild_id in sorted(events_by_guild):
+            try:
+                await self._sync_events(events_by_guild[guild_id])
+            except Exception:
+                logger.exception("Failed to sync events for guild %s", guild_id)
 
     @event_tick.before_loop
     async def before_tick(self):
@@ -259,7 +307,7 @@ class SeasonalEvents(commands.Cog):
         channel="Announcement channel",
         description="Optional event description"
     )
-    @commands.has_permissions(manage_guild=True)
+    @commands.has_permissions(manage_events=True)
     @commands.guild_only()
     async def event_create(
         self,
@@ -280,7 +328,7 @@ class SeasonalEvents(commands.Cog):
         if end_dt <= start_dt:
             return await ctx.reply("End time must be after the start time.")
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT event_id, name, start_at, end_at FROM events WHERE guild_id = ? AND status IN ('scheduled', 'active')",
                 (ctx.guild.id,)
@@ -346,8 +394,10 @@ class SeasonalEvents(commands.Cog):
         event_id, name, description, start_at, end_at, status, channel_id = active
         await self._ensure_joined(event_id, ctx.author.id)
 
-        today = _utcnow().date().isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
+        now_dt = _utcnow()
+        today = now_dt.date().isoformat()
+        now = now_dt.isoformat()
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT last_checkin FROM event_participants WHERE event_id = ? AND user_id = ?",
                 (event_id, ctx.author.id)
@@ -356,12 +406,13 @@ class SeasonalEvents(commands.Cog):
             if row and row[0] == today:
                 return await ctx.reply("You already checked in today. Try again tomorrow.")
             await db.execute(
-                "UPDATE event_participants SET last_checkin = ?, last_activity = ? WHERE event_id = ? AND user_id = ?",
-                (today, _utcnow().isoformat(), event_id, ctx.author.id)
+                "UPDATE event_participants SET last_checkin = ?, last_activity = ?, points = points + 1 "
+                "WHERE event_id = ? AND user_id = ?",
+                (today, now, event_id, ctx.author.id)
             )
+            await self._log_point_action(db, event_id, ctx.author.id, 1, "daily_checkin", created_at=now)
             await db.commit()
 
-        await self._add_points(event_id, ctx.author.id, 1, "daily_checkin")
         await ctx.reply("Check-in recorded. +1 point.")
 
     @event_group.command(name="leaderboard", description="Show top event players.")
@@ -399,7 +450,7 @@ class SeasonalEvents(commands.Cog):
         if not active:
             return await ctx.reply("No active event right now.")
         event_id, name, description, start_at, end_at, status, channel_id = active
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT points, last_checkin FROM event_participants WHERE event_id = ? AND user_id = ?",
                 (event_id, ctx.author.id)
@@ -419,7 +470,7 @@ class SeasonalEvents(commands.Cog):
 
     @event_group.command(name="award", description="Award points to a participant.")
     @app_commands.describe(user="User to award", points="Points to add", reason="Reason for the award")
-    @commands.has_permissions(manage_guild=True)
+    @commands.has_permissions(manage_events=True)
     @commands.guild_only()
     async def event_award(self, ctx: commands.Context, user: discord.Member, points: int, *, reason: str = "manual_award"):
         if ctx.guild is None:
@@ -436,7 +487,7 @@ class SeasonalEvents(commands.Cog):
         await ctx.reply(f"Awarded {points} points to {user.mention}.")
 
     @event_group.command(name="start", description="Manually start the next scheduled event.")
-    @commands.has_permissions(manage_guild=True)
+    @commands.has_permissions(manage_events=True)
     @commands.guild_only()
     async def event_start(self, ctx: commands.Context):
         if ctx.guild is None:
@@ -454,7 +505,7 @@ class SeasonalEvents(commands.Cog):
         await ctx.reply(f"Started **{name}**.")
 
     @event_group.command(name="end", description="Manually end the active event.")
-    @commands.has_permissions(manage_guild=True)
+    @commands.has_permissions(manage_events=True)
     @commands.guild_only()
     async def event_end(self, ctx: commands.Context):
         if ctx.guild is None:
@@ -470,12 +521,12 @@ class SeasonalEvents(commands.Cog):
 
     @event_group.command(name="cancel", description="Cancel a scheduled event.")
     @app_commands.describe(event_id="Event ID to cancel")
-    @commands.has_permissions(manage_guild=True)
+    @commands.has_permissions(manage_events=True)
     @commands.guild_only()
     async def event_cancel(self, ctx: commands.Context, event_id: int):
         if ctx.guild is None:
             return await ctx.reply("This command can only be used in a server.")
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT name, status FROM events WHERE event_id = ? AND guild_id = ?",
                 (event_id, ctx.guild.id)

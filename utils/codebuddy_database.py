@@ -137,8 +137,19 @@ async def init_db():
             )
         """)
 
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_actions'"
+        )
+        has_legacy_event_actions = await cursor.fetchone()
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_point_actions'"
+        )
+        has_event_point_actions = await cursor.fetchone()
+        if has_legacy_event_actions and not has_event_point_actions:
+            await db.execute("ALTER TABLE event_actions RENAME TO event_point_actions")
+
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS event_actions (
+            CREATE TABLE IF NOT EXISTS event_point_actions (
                 action_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
